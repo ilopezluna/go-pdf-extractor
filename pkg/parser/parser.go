@@ -11,13 +11,11 @@ import (
 
 	"github.com/gen2brain/go-fitz"
 	"github.com/ilopezluna/go-pdf-extractor/pkg/types"
-	"github.com/unidoc/unipdf/v3/extractor"
-	"github.com/unidoc/unipdf/v3/model"
+	"github.com/pdfcpu/pdfcpu/pkg/api"
 )
 
 const (
 	defaultTextThreshold = 100
-	defaultDPI           = 300 // DPI for image conversion
 )
 
 // ParsePdfFromPath parses a PDF file from a file path and extracts its content
@@ -114,50 +112,54 @@ func hasExtractableText(text string, threshold int) bool {
 
 // extractTextFromPdf extracts text content and metadata from a PDF buffer
 func extractTextFromPdf(buffer []byte) (text string, numPages int, info map[string]interface{}, err error) {
-	// Create a reader from bytes
-	reader := bytes.NewReader(buffer)
-	pdfReader, err := model.NewPdfReader(reader)
+	// Get page count first using pdfcpu
+	numPages, err = getPageCount(buffer)
 	if err != nil {
-		return "", 0, nil, err
+		numPages = 1 // Default to 1 page if we can't determine
 	}
 
-	// Get number of pages
-	numPages, err = pdfReader.GetNumPages()
+	// Use go-fitz for reliable text extraction
+	// (pdfcpu's text extraction API requires file system operations which are more complex)
+	doc, err := fitz.NewFromMemory(buffer)
 	if err != nil {
-		return "", 0, nil, err
+		return "", numPages, make(map[string]interface{}), nil
 	}
+	defer doc.Close()
 
 	// Extract text from all pages
 	var textBuilder strings.Builder
-	for pageNum := 1; pageNum <= numPages; pageNum++ {
-		page, err := pdfReader.GetPage(pageNum)
+	for pageNum := 0; pageNum < numPages; pageNum++ {
+		pageText, err := doc.Text(pageNum)
 		if err != nil {
 			continue
 		}
-
-		ex, err := extractor.New(page)
-		if err != nil {
-			continue
-		}
-
-		pageText, err := ex.ExtractText()
-		if err != nil {
-			continue
-		}
-
 		textBuilder.WriteString(pageText)
 		textBuilder.WriteString("\n")
 	}
 
-	// Get PDF info/metadata
+	// Create empty info map
 	info = make(map[string]interface{})
 
-	// Try to get PDF document info if available
-	// Note: unipdf v3 may not expose all metadata in the same way
-	// We'll keep the info map empty for now as the metadata access
-	// depends on the specific PDF structure
-
 	return textBuilder.String(), numPages, info, nil
+}
+
+// getPageCount returns the number of pages in a PDF using pdfcpu
+func getPageCount(buffer []byte) (int, error) {
+	reader := bytes.NewReader(buffer)
+
+	// Use pdfcpu's Info to get page count
+	// api.PDFInfo(rs io.ReadSeeker, fileName string, selectedPages []string, json bool, conf *model.Configuration) (*pdfcpu.PDFInfo, error)
+	pdfInfo, err := api.PDFInfo(reader, "", nil, false, nil)
+	if err != nil {
+		return 0, err
+	}
+
+	// Get page count from PDFInfo struct
+	if pdfInfo != nil && pdfInfo.PageCount > 0 {
+		return pdfInfo.PageCount, nil
+	}
+
+	return 1, nil
 }
 
 // convertPdfToImages converts PDF pages to base64-encoded PNG images
